@@ -14,7 +14,7 @@ import sys
 import time
 import numpy as np
 
-class SIM900(Object):
+class SIM900:
 
     def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE, 
                              stopbits=serial.STOPBITS_ONE, timeout=None,
@@ -87,6 +87,8 @@ class SIM900(Object):
                       (None if s_port == -1 else \
                         lambda: self.stream_sim921(s_port))
         self.s_buf = []
+        self.s_run = False
+
 
         # Non-streaming part
         self.ns_func = ns_func if ns_func else self.non_stream
@@ -96,7 +98,16 @@ class SIM900(Object):
 
     def __del__(self):
         if self.ser.is_open:
-        self.ser.close()
+            self.ser.close()
+
+    def configure(self):
+        '''Set all termination to LF, set the port for streaming to pass 
+        through mode.
+        '''
+        for i in range(1, 0xE):
+            self.set("TERM", port=i, str_block="LF")
+        if self.s_port != -1:
+            self.set("RPER", integer=2 ** self.s_port)
 
     def send(self, message):
         '''General purpose send
@@ -177,16 +188,7 @@ class SIM900(Object):
 
         time.sleep(waittime)
 
-        return self.receive()
-
-    def configure(self):
-        '''Set all termination to LF, set the port for streaming to pass 
-        through mode.
-        '''
-        for i in range(1, 0xE):
-            self.set("TERM", port=i, str_block="LF")
-        if self.s_port != -1:
-            self.set("RPER", integer=2 ** self.s_port)
+        return self.recv()
 
     def stream_sim921(self, port):
         pass
