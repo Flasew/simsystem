@@ -16,6 +16,7 @@ import numpy as np
 from sys import stderr
 from datetime import datetime
 from multiprocessing import Process, ProcessError, Lock
+from multiprocessing.queues import SimpleQueue
 
 
 DEBUG = True
@@ -109,16 +110,14 @@ class SIM900:
         self.s_fname = \
             "{:s}stream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))\
             if s_fname is None else s_fname
-        self.s_file = open(self.s_fname, 'w+')
-        self.s_buf = []
+        self.s_buf = None
         
         # Non-streaming part
         self.ns_func = ns_func if ns_func else self.non_stream
         self.ns_fname = \
             "{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))\
             if ns_fname is None else ns_fname
-        self.ns_file = open(self.ns_fname, 'w+')
-        self.ns_buf = []
+        self.ns_buf = None
 
         self.configure()
         self.signaled = False
@@ -144,7 +143,7 @@ class SIM900:
             self.sendcmd("TERM", port=i, literal="LF")
             self.sendcmd("SNDT", port=i, str_block=self.makecmd("TERM", literal=0))
         if self.s_port != -1:
-            self.sendcmd("RPER", num=2 ** self.s_port)
+            self.sendcmd("RPER", num=sum([2 ** i for i in range(1, 9)]))
 
     def send(self, message):
         '''General purpose send
@@ -214,16 +213,16 @@ class SIM900:
         message = self.makecmd(command, port, str_block, literal, num)
         return self.query(message)
 
-    def parse_getn(self, msg):
-        '''Parse a response from getn'''
+    def parse(self, msg, count_start, count_stop):
+        '''Parse a response'''
         try:
-            msglen = int(msg[2:5].lstrip('0'))
-            return msg[-msglen:].rstrip() 
+            msglen = int(msg[count_start:count_stop].lstrip('0'))
+            return msg[-msglen:]
         except ValueError:
             return ''
 
-    def parse_pth(self, msg):
-        return self.parse_getn(msg[5:].lstrip())
+    def parse_from_port(self, msg):
+        return int(msg[4:5]), msg[6:]
         
     def stream_sim921(self):
         '''Stream-reading working function for sim921 module.
@@ -231,30 +230,24 @@ class SIM900:
         '''
         # start the stream 
         dprint("DEBUG: Streaming process started.")
-        self.s_file.write("Time, tval\n")
 
         self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TPER", num=100))
         self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TVAL?", num=0))
 
         while not self.signaled:
             self.lock.acquire()
-            tval = self.parse_pth(self.recv())
+            tval = self.parse(self.recv(), 8, 10)
             currtime = int(round(time.time() * 1000))
             dprint("DEBUG: sfunc ", end='')
             dprint(tval, currtime)
 
-            self.s_file.write("{:d}, {:s}\n".format(currtime, tval))
-
-            dprint("DEBUG: s_file write ", end='')
-            dprint("{:d}, {:s}\n".format(currtime, tval))
-
-            #self.s_buf.append([currtime, tval])
-            #print(self.s_buf)
+            self.s_buf.put((currtime, tval))
             self.lock.release()
             time.sleep(0.01)
 
         self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("SOUT"))
-        self.s_file.flush()
+        self.s_buf.put(None)
+
         dprint("DEBUG: Streaming process stopped.")
 
     def non_stream(self):
@@ -268,7 +261,6 @@ class SIM900:
         the streaming function.
         '''
         dprint("DEBUG: Non-streaming process started.")
-        self.ns_file.write("Time, SN1, SN2, SN3\n")
 
         while not self.signaled:
             self.lock.acquire()
@@ -278,33 +270,32 @@ class SIM900:
             self.sendcmd("SNDT", 5, str_block="*IDN?")
             self.sendcmd("SNDT", 6, str_block="*IDN?")
             currtime = int(round(time.time() * 1000))
+
             self.lock.release()
 
             time.sleep(1)
+            res = [currtime]
 
-            self.lock.acquire()
-            # disable pass through
-            self.sendcmd("RPER", num=0)
-
-            sn4 = self.parse_getn(self.querycmd("GETN?", 4, num=128))
-            sn5 = self.parse_getn(self.querycmd("GETN?", 5, num=128))
-            sn6 = self.parse_getn(self.querycmd("GETN?", 6, num=128))
-
-            self.sendcmd("RPER", num=2 ** self.s_port)
-
-            # write to file
-            # print(len(self.s_buf))
-            # for i in range(len(self.s_buf)):
+            for port in (4,5,6):    
                 
-            # self.s_buf[:] = []
+                self.lock.acquire()
+                self.sendcmd("RPER", num=0)
+                # sn4 = 'N'
+                # sn5 = 'N'
+                # sn6 = 'N'
+                self.sendcmd("RPER", num=2**port)
+                res.append(self.parse(self.recv(), 2, 5))
+                # sn5 = self.parse(self.querycmd("GETN?", 5, num=128), 2, 5)
+                # sn6 = self.parse(self.querycmd("GETN?", 6, num=128), 2, 5)
 
-            self.lock.release()
-            self.ns_file.write("{:d}, {:s}, {:s}, {:s}\n".format(currtime, sn4, sn5, sn6))
 
-            dprint("DEBUG: ns_file write ", end='')
-            dprint("{:d}, {:s}, {:s}, {:s}\n".format(currtime, sn4, sn5, sn6))
+                self.sendcmd("RPER", num=2 ** self.s_port)
+                self.lock.release()
+                time.sleep(0.01)
+            
+            self.ns_buf.put(tuple(res))
 
-        self.ns_file.flush()
+        self.ns_buf.put(None)
         dprint("DEBUG: Non-streaming process stopped.")
 
 
@@ -323,24 +314,53 @@ class SIM900:
         signal.signal(signal.SIGHUP, lambda s, f: self.set_signal())
         signal.signal(signal.SIGTERM, lambda s, f: self.set_signal())
 
+        self.s_buf = SimpleQueue()
+        self.ns_buf = SimpleQueue()
+
         s_process = Process(target = self.s_func)
         ns_process = Process(target = self.ns_func)
+        s_fwrite_proc = Process(target = \
+            lambda: file_writer(self.s_fname, "Time, tval\n", 
+                                "%d, %s\n", self.s_buf))
+        ns_fwrite_proc = Process(target = \
+            lambda: file_writer(self.ns_fname, "Time, SN1, SN2, SN3\n", 
+                                "%d, %s, %s, %s\n", self.ns_buf))
 
         s_process.start()
+        s_fwrite_proc.start()
         ns_process.start()
-        dprint("DEBUG: Both run called.")
+        ns_fwrite_proc.start()
+        dprint("DEBUG: All starts called.")
 
         s_process.join()
         ns_process.join()
+        s_fwrite_proc.join()
+        ns_fwrite_proc.join()
+
+        del self.s_buf
+        del self.ns_buf
 
         # restore the original handlers
         signal.signal(signal.SIGINT, original_sigint)
         signal.signal(signal.SIGHUP, original_sighup)
         signal.signal(signal.SIGTERM, original_sigterm)
 
-
     
 
+
+def file_writer(filename, title_line, formatted_str, buffer):
+    '''File writing worker function. Buffer is expected to be a queue or a
+    Simplequeue. 
+    '''
+    with open(filename, 'w+') as f:
+        
+        f.write(title_line)
+
+        while True:
+            data = buffer.get()
+            if data is None:    
+                break
+            f.write(formatted_str % data)
 
 
 
