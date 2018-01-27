@@ -147,10 +147,10 @@ class SIM900:
         # log file attributes
         self.s_fname = s_fname if s_fname else None
         self.ns_fname = ns_fname if ns_fname else None
-        self.s_fheader = ''
-        self.ns_fheader = ''
-        self.s_fstr = None
-        self.ns_fstr = None
+        self.s_fheader = s_fheader if s_fheader else '' 
+        self.ns_fheader = ns_fheader if ns_fheader else ''
+        self.s_fstr = s_fstr if s_fstr else None
+        self.ns_fstr = s_fstr if s_fstr None
 
         # buffers
         self.s_buf = None
@@ -211,7 +211,7 @@ class SIM900:
         '''
         message += '\n'
         dprint("DEBUG: send ", end='')
-        dprint(message)
+        dprint(message, end='')
         self.ser.write(message)
 
     def recv(self):
@@ -349,113 +349,13 @@ def main():
     d.s_fstr = "%d, %s\n"
     d.ns_fstr = "%d, %s, %s, %s\n"
     d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4)
-    d.add_nonstream_cmd(4, "*IDN?", 5)
-    d.add_nonstream_cmd(5, "*IDN?", 5)
-    d.add_nonstream_cmd(6, "*IDN?", 5)
+    d.add_nonstream_cmd(4, "*IDN?", 4)
+    d.add_nonstream_cmd(5, "*IDN?", 4)
+    d.add_nonstream_cmd(6, "*IDN?", 4)
     d.start()
 
 # if __name__ == '__main__':
 #    main()
-
-
-    # def stream_sim921(self):
-    #     '''Stream-reading working function for sim921 module.
-    #     Stream function should handle file header.
-    #     '''
-    #     # start the stream
-    #     dprint("DEBUG: Streaming process started.")
-
-    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TPER", num=100))
-    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TVAL?", num=0))
-
-    #     while not self.signaled:
-    #         self.lock.acquire()
-    #         tval = self.parse(self.recv(), 8, 10)
-    #         currtime = int(round(time.time() * 1000))
-    #         dprint("DEBUG: sfunc ", end='')
-    #         dprint(tval, currtime)
-
-    #         self.s_buf.put((currtime, tval))
-    #         self.lock.release()
-    #         time.sleep(0.01)
-
-    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("SOUT"))
-    #     self.s_buf.put(None)
-
-    #     dprint("DEBUG: Streaming process stopped.")
-
-    # def non_stream(self):
-    #     '''Non-streaming reading worker function. Also handles buffer-clear
-    #     for the streaming thread.
-
-    #     Lock the port, make all the query requests, release the lock, wait for a
-    #     while, then re-acquire the lock and perform all the readings.
-
-    #     This method assumes 100ms is enough for a lock-read-unlock period for
-    #     the streaming function.
-    #     '''
-    #     dprint("DEBUG: Non-streaming process started.")
-
-    #     while not self.signaled:
-    #         self.lock.acquire()
-
-    #         # query whatever is wanted
-    #         self.sendcmd("SNDT", 4, str_block="*IDN?")
-    #         self.sendcmd("SNDT", 5, str_block="*IDN?")
-    #         self.sendcmd("SNDT", 6, str_block="*IDN?")
-    #         currtime = int(round(time.time() * 1000))
-
-    #         self.lock.release()
-
-    #         time.sleep(1)
-    #         res = [currtime]
-
-    #         for port in (4,5,6):
-
-    #             self.lock.acquire()
-    #             self.sendcmd("RPER", num=0)
-    #             # sn4 = 'N'
-    #             # sn5 = 'N'
-    #             # sn6 = 'N'
-    #             self.sendcmd("RPER", num=2**port)
-    #             res.append(self.parse(self.recv(), 2, 5))
-    #             # sn5 = self.parse(self.querycmd("GETN?", 5, num=128), 2, 5)
-    #             # sn6 = self.parse(self.querycmd("GETN?", 6, num=128), 2, 5)
-
-
-    #             self.sendcmd("RPER", num=2 ** self.s_port)
-    #             self.lock.release()
-    #             time.sleep(0.01)
-
-    #         self.ns_buf.put(tuple(res))
-
-    #     self.ns_buf.put(None)
-    #     dprint("DEBUG: Non-streaming process stopped.")
-
-    #"{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
