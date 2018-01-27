@@ -30,40 +30,78 @@ def dprint(*args, **kwargs):
     if DEBUG:
         eprint(*args, **kwargs)
 
+def makecmd(command, port=None, str_block=None, literal=None, num=None):
+    '''make a command string. 
+    Arguments:
+        command {str} -- 4-letter command string       
+    
+    Keyword Arguments:
+        port {number} -- port that this command should be route to. If set
+                         to None, will only be send to mainframe (default: {None})
+        num {number} -- num field of command (default: {None})
+        literal {str} -- literal field.
+        str_block {str} -- Multi-byte (string) block field of the command. 
+                           If uses the Quote-delimited strings, please also
+                           include the outer quotes since ' and " can be confusing.
+                           If the field has a literal token instead of a 
+                           string block, also put it here (of course without
+                           the outer quotes.)
+    '''
+    message = command
+
+    if port:    
+        message += " " + str(port)
+    if literal is not None:
+        message += ("," if port else " ") + str(literal)
+    if str_block is not None: 
+        message += ("," if port or literal else " ") + "'" + str(str_block) + "'"
+    if num is not None:
+        message += ("," if port or str_block or literal else " ") + str(num)
+
+    return message
+
+def parse_retstr(msg, msg_start):
+    '''Parse a response of #abbbccccc... format.
+    Argument:
+        msg {str} -- message to be parsed
+        msg_start {int} -- index of the first useful letter in message
+    '''
+    try:
+        return msg[msg_start:]
+    except IndexError:
+        return ''
+
+def parse_portmsg(msg):
+    if msg[0:3] == 'MSG':
+        return int(msg[4:5]), msg[6:]
+    elif len(msg) != 0:
+        return 0, msg
+    else:
+        return -1, None
+
+def file_writer(filename, title_line, formatted_str, buffer):
+    '''File writing worker function. Buffer is expected to be a queue or a
+    Simplequeue. 
+    '''
+    with open(filename, 'w+') as f:
+        
+        f.write(title_line)
+
+        while True:
+            data = buffer.get()
+            if data is None:    
+                break
+            f.write(formatted_str % data)
+
+
 class SIM900:
 
     def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE, 
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
-                             waittime=0,
-                             s_port=1, s_func=None, s_fname=None,
-                             ns_func=None, ns_fname=None):
+                             waittime=0, s_tper=100, ns_tper=1000,
+                             s_fname=None, ns_fname=None):
         '''SIM900 class constructor. Set the serial attributes, and configure the 
         stream/non-streaming ports.
-        
-        The streaming and non-streaming ports works in the following way:
-        If there is a streaming port, only this port's output will be directly 
-        passed to the host from SIM900. A dedicated streaming process will be 
-        initialized. The streaming thread loops forever until receives a stop
-        signal. During the loop. the process will acquire a lock which prevents
-        other function from having the serial port. Whenever there is a non-streaming
-        read request, which will be initialized as another process,
-        it will block until the streaming releases the lock and 
-        send the reading command. After the ns-function acquires the lock it will 
-        send the query message, release the lock, wait for a few moments (to allow 
-        stream to run if there's available data), re-acquire the lock, and try to
-        read the data. 
-
-        s_func is the streaming function. It should have a infinite loop and 
-        should acquire the lock each time on entering the loop, release the lock
-        each time leaving it.
-
-        ns_func is the non-streaming function. It should acquire the lock before
-        sending the query request, release the lock, wait for a short time, then
-        re-acquire the lock to get the response.
-
-        Notice that both s_func and ns_func will be feed to the Process constructor,
-        thus they by themselves need to have no argument. Therefore any arguments
-        need to be passed as lambda functions.
         
         Arguments:
             port {str} -- Serial port address under /dev/
@@ -81,12 +119,6 @@ class SIM900:
                                  with the previous streaming port. (default: {None})
             s_fname {str} -- file to store streamed data. If none, a file with 
                             name "YYYYMMDDHHMMstream.csv" will be created
-            ns_func {function} -- function run for non-streaming reading. If 
-                                  there is no streaming, it might be better 
-                                  to not use this functionality but just
-                                  use the query commands (default: {None})
-            ns_fname {str} -- file to store non-streamed data. If none, a file with 
-                             name "YYYYMMDDHHMMnostream.csv" will be created
         '''
 
         # Deal with the serial port 
@@ -99,25 +131,29 @@ class SIM900:
             self.ser.open()
         
         self.waittime = waittime
-        # Steaming part
-        
-        # lock that controls the async behavior
-        self.lock = Lock()
 
-        self.s_port = s_port
-        self.s_func = s_func if s_func else \
-                      (None if s_port == -1 else self.stream_sim921)
-        self.s_fname = \
-            "{:s}stream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))\
-            if s_fname is None else s_fname
+        # stream / non-stream commands 
+        self.s_command = []
+        self.ns_commands = []
+
+        # stream time period
+        self.s_tper = s_tper
+
+        # time to wait between non-streaming readings
+        self.ns_tper = ns_tper
+
+        # log file attributes
+        self.s_fname = s_fname if s_fname else None
+        self.ns_fname = ns_fname if ns_fname else None 
+        self.s_fheader = ''
+        self.ns_fheader = ''
+        self.s_fstr = None
+        self.ns_fstr = None
+
+        # buffers
         self.s_buf = None
-        
-        # Non-streaming part
-        self.ns_func = ns_func if ns_func else self.non_stream
-        self.ns_fname = \
-            "{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))\
-            if ns_fname is None else ns_fname
         self.ns_buf = None
+        self.main_msg = []
 
         self.configure()
         self.signaled = False
@@ -141,9 +177,33 @@ class SIM900:
         '''
         for i in range(1, 10):
             self.sendcmd("TERM", port=i, literal="LF")
-            self.sendcmd("SNDT", port=i, str_block=self.makecmd("TERM", literal=0))
-        if self.s_port != -1:
-            self.sendcmd("RPER", num=sum([2 ** i for i in range(1, 9)]))
+            self.sendcmd("SNDT", port=i, str_block=makecmd("TERM", literal=0))
+        self.sendcmd("RPER", num=sum([2 ** i for i in range(1, 0xF)]))
+
+    def set_stream_cmd(self, port, cmd, msg_start):
+        '''Set the streaming port and command. Notice that only ONE port can be
+        streaming, so this command will overwrite whatever was in s_command.
+        
+        Arguments:
+            port {int} -- port to stream from
+            cmd {str} -- a command that the terminal device can understand and 
+            turns it into the stream mode.
+        '''
+        self.s_command = [port, cmd, msg_start]
+
+    def add_nonstream_cmd(self, port, cmd, msg_start):
+        '''Add a command to the non-streaming command list. This should
+        be a query command. Unlike the non-streaming one, this one can have
+        multiple ports. 
+        non-stream command also supports multiple commands for one port.
+        THe commands are stored as port-list of command dictionary.
+        
+        Arguments:
+            port {int} -- port to stream from
+            cmd {str} -- a command that the terminal device can understand and 
+            turns it into the stream mode.
+        '''
+        self.ns_commands.append([port, cmd, msg_start])
 
     def send(self, message):
         '''General purpose send
@@ -171,133 +231,69 @@ class SIM900:
         time.sleep(self.waittime)
         return self.recv()
 
-    def makecmd(self, command, port=None, str_block=None, literal=None, num=None):
-        '''make a command string. 
-        Arguments:
-            command {str} -- 4-letter command string       
-        
-        Keyword Arguments:
-            port {number} -- port that this command should be route to. If set
-                             to None, will only be send to mainframe (default: {None})
-            num {number} -- num field of command (default: {None})
-            literal {str} -- literal field.
-            str_block {str} -- Multi-byte (string) block field of the command. 
-                               If uses the Quote-delimited strings, please also
-                               include the outer quotes since ' and " can be confusing.
-                               If the field has a literal token instead of a 
-                               string block, also put it here (of course without
-                               the outer quotes.)
-        '''
-        message = command
-
-        if port:    
-            message += " " + str(port)
-        if literal is not None:
-            message += ("," if port else " ") + str(literal)
-        if str_block is not None: 
-            message += ("," if port or literal else " ") + "'" + str(str_block) + "'"
-        if num is not None:
-            message += ("," if port or str_block or literal else " ") + str(num)
-
-        return message
-
     def sendcmd(self, command, port=None, str_block=None, literal=None, num=None):
         '''Wrapper for makecmd-send
         '''
-        message = self.makecmd(command, port, str_block, literal, num)
+        message = makecmd(command, port, str_block, literal, num)
         self.send(message)
 
     def querycmd(self, command, port=None, str_block=None, literal=None, num=None):
         '''Wrapper for makecmd-query
         '''
-        message = self.makecmd(command, port, str_block, literal, num)
+        message = makecmd(command, port, str_block, literal, num)
         return self.query(message)
 
-    def parse(self, msg, count_start, count_stop):
-        '''Parse a response'''
-        try:
-            msglen = int(msg[count_start:count_stop].lstrip('0'))
-            return msg[-msglen:]
-        except ValueError:
-            return ''
-
-    def parse_from_port(self, msg):
-        return int(msg[4:5]), msg[6:]
-        
-    def stream_sim921(self):
-        '''Stream-reading working function for sim921 module.
-        Stream function should handle file header.
+    def sorter(self):
+        '''A worker function that separates the return value from streaming 
+        thread from the non-streaming thread. Once a message is received from
+        the SIM900, It will be put into either @self.s_buf if it it comes 
+        from a streaming port, or @self.ns_buf if it is not. Message from the 
+        mainframe will be put into @self.main_msg list, which is different from
+        the other two SimpleQueue FIFO buffers.
         '''
-        # start the stream 
-        dprint("DEBUG: Streaming process started.")
-
-        self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TPER", num=100))
-        self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TVAL?", num=0))
+        ns_recv_count = 0
+        ns_all_msg = []
 
         while not self.signaled:
-            self.lock.acquire()
-            tval = self.parse(self.recv(), 8, 10)
+
+            port, raw_msg = parse_portmsg(self.recv())
             currtime = int(round(time.time() * 1000))
-            dprint("DEBUG: sfunc ", end='')
-            dprint(tval, currtime)
 
-            self.s_buf.put((currtime, tval))
-            self.lock.release()
-            time.sleep(0.01)
+            if port == self.s_command[0]:
+                msg = parse_retstr(raw_msg, self.s_command[2])
+                self.s_buf.put((currtime, msg))
 
-        self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("SOUT"))
+            elif port == 0:
+                self.main_msg.append([currtime, msg])
+
+            elif port == -1:
+                eprint("WARNING: Serial port timed out")
+                continue
+
+            else:  
+                if ns_recv_count == 0:
+                    ns_all_msg.append(currtime)
+
+                ns_all_msg.append(
+                    parse_retstr(raw_msg, self.ns_commands[ns_recv_count][2]))
+
+                ns_recv_count += 1
+
+                if ns_recv_count == len(self.ns_commands):
+                    self.ns_buf.put(tuple(ns_all_msg))
+                    ns_recv_count = 0
+                    ns_all_msg[:] = []
+
+        # put nones for exit
+        self.sendcmd("SNDT", self.s_command[0], str_block="SOUT")
         self.s_buf.put(None)
-
-        dprint("DEBUG: Streaming process stopped.")
-
-    def non_stream(self):
-        '''Non-streaming reading worker function. Also handles buffer-clear 
-        for the streaming thread.
-
-        Lock the port, make all the query requests, release the lock, wait for a
-        while, then re-acquire the lock and perform all the readings. 
-
-        This method assumes 100ms is enough for a lock-read-unlock period for
-        the streaming function.
-        '''
-        dprint("DEBUG: Non-streaming process started.")
-
-        while not self.signaled:
-            self.lock.acquire()
-            
-            # query whatever is wanted
-            self.sendcmd("SNDT", 4, str_block="*IDN?")
-            self.sendcmd("SNDT", 5, str_block="*IDN?")
-            self.sendcmd("SNDT", 6, str_block="*IDN?")
-            currtime = int(round(time.time() * 1000))
-
-            self.lock.release()
-
-            time.sleep(1)
-            res = [currtime]
-
-            for port in (4,5,6):    
-                
-                self.lock.acquire()
-                self.sendcmd("RPER", num=0)
-                # sn4 = 'N'
-                # sn5 = 'N'
-                # sn6 = 'N'
-                self.sendcmd("RPER", num=2**port)
-                res.append(self.parse(self.recv(), 2, 5))
-                # sn5 = self.parse(self.querycmd("GETN?", 5, num=128), 2, 5)
-                # sn6 = self.parse(self.querycmd("GETN?", 6, num=128), 2, 5)
-
-
-                self.sendcmd("RPER", num=2 ** self.s_port)
-                self.lock.release()
-                time.sleep(0.01)
-            
-            self.ns_buf.put(tuple(res))
-
         self.ns_buf.put(None)
-        dprint("DEBUG: Non-streaming process stopped.")
 
+    def ns_cmd_sender(self):
+        while not self.signaled:
+            for cmd in self.ns_commands:
+                self.sendcmd("SNDT", cmd[0], str_block=cmd[1])
+            time.sleep(self.ns_tper/1000.0)
 
     def start(self):
         '''Start streaming
@@ -317,23 +313,26 @@ class SIM900:
         self.s_buf = SimpleQueue()
         self.ns_buf = SimpleQueue()
 
-        s_process = Process(target = self.s_func)
-        ns_process = Process(target = self.ns_func)
+        s_fname = self.s_fname if self.s_fname else "{:s}stream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
+        ns_fname = self.ns_fname if self.ns_fname else "{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
+        
         s_fwrite_proc = Process(target = \
-            lambda: file_writer(self.s_fname, "Time, tval\n", 
-                                "%d, %s\n", self.s_buf))
+            lambda: file_writer(s_fname, self.s_fheader, self.s_fstr, self.s_buf))
         ns_fwrite_proc = Process(target = \
-            lambda: file_writer(self.ns_fname, "Time, SN1, SN2, SN3\n", 
-                                "%d, %s, %s, %s\n", self.ns_buf))
+            lambda: file_writer(ns_fname, self.ns_fheader, self.ns_fstr, self.ns_buf))
+        sort_proc = Process(target = self.sorter)
+        ns_proc = Process(target = self.ns_cmd_sender)
 
-        s_process.start()
+        self.sendcmd("SNDT", self.s_command[0], str_block=makecmd("TPER", num=self.s_tper))
+        self.sendcmd("SNDT", self.s_command[0], str_block=self.s_command[1])
+
         s_fwrite_proc.start()
-        ns_process.start()
         ns_fwrite_proc.start()
-        dprint("DEBUG: All starts called.")
+        sort_proc.start()
+        ns_proc.start()
 
-        s_process.join()
-        ns_process.join()
+        sort_proc.join()
+        ns_proc.join()
         s_fwrite_proc.join()
         ns_fwrite_proc.join()
 
@@ -345,22 +344,98 @@ class SIM900:
         signal.signal(signal.SIGHUP, original_sighup)
         signal.signal(signal.SIGTERM, original_sigterm)
 
+def main():
+    d = SIM900('/dev/ttyS0', s_fname="tests.csv", ns_fname="testns.csv")
+    d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4)
+    d.add_nonstream_cmd(4, "*IDN?", 5)
+    d.add_nonstream_cmd(5, "*IDN?", 5)
+    d.add_nonstream_cmd(6, "*IDN?", 5)
+    d.start()
+
+if __name__ == '__main__':
+    main()
+
+
+    # def stream_sim921(self):
+    #     '''Stream-reading working function for sim921 module.
+    #     Stream function should handle file header.
+    #     '''
+    #     # start the stream 
+    #     dprint("DEBUG: Streaming process started.")
+
+    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TPER", num=100))
+    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("TVAL?", num=0))
+
+    #     while not self.signaled:
+    #         self.lock.acquire()
+    #         tval = self.parse(self.recv(), 8, 10)
+    #         currtime = int(round(time.time() * 1000))
+    #         dprint("DEBUG: sfunc ", end='')
+    #         dprint(tval, currtime)
+
+    #         self.s_buf.put((currtime, tval))
+    #         self.lock.release()
+    #         time.sleep(0.01)
+
+    #     self.sendcmd("SNDT", self.s_port, str_block=self.makecmd("SOUT"))
+    #     self.s_buf.put(None)
+
+    #     dprint("DEBUG: Streaming process stopped.")
+
+    # def non_stream(self):
+    #     '''Non-streaming reading worker function. Also handles buffer-clear 
+    #     for the streaming thread.
+
+    #     Lock the port, make all the query requests, release the lock, wait for a
+    #     while, then re-acquire the lock and perform all the readings. 
+
+    #     This method assumes 100ms is enough for a lock-read-unlock period for
+    #     the streaming function.
+    #     '''
+    #     dprint("DEBUG: Non-streaming process started.")
+
+    #     while not self.signaled:
+    #         self.lock.acquire()
+            
+    #         # query whatever is wanted
+    #         self.sendcmd("SNDT", 4, str_block="*IDN?")
+    #         self.sendcmd("SNDT", 5, str_block="*IDN?")
+    #         self.sendcmd("SNDT", 6, str_block="*IDN?")
+    #         currtime = int(round(time.time() * 1000))
+
+    #         self.lock.release()
+
+    #         time.sleep(1)
+    #         res = [currtime]
+
+    #         for port in (4,5,6):    
+                
+    #             self.lock.acquire()
+    #             self.sendcmd("RPER", num=0)
+    #             # sn4 = 'N'
+    #             # sn5 = 'N'
+    #             # sn6 = 'N'
+    #             self.sendcmd("RPER", num=2**port)
+    #             res.append(self.parse(self.recv(), 2, 5))
+    #             # sn5 = self.parse(self.querycmd("GETN?", 5, num=128), 2, 5)
+    #             # sn6 = self.parse(self.querycmd("GETN?", 6, num=128), 2, 5)
+
+
+    #             self.sendcmd("RPER", num=2 ** self.s_port)
+    #             self.lock.release()
+    #             time.sleep(0.01)
+            
+    #         self.ns_buf.put(tuple(res))
+
+    #     self.ns_buf.put(None)
+    #     dprint("DEBUG: Non-streaming process stopped.")
+
+    #"{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
+
+
     
 
 
-def file_writer(filename, title_line, formatted_str, buffer):
-    '''File writing worker function. Buffer is expected to be a queue or a
-    Simplequeue. 
-    '''
-    with open(filename, 'w+') as f:
-        
-        f.write(title_line)
-
-        while True:
-            data = buffer.get()
-            if data is None:    
-                break
-            f.write(formatted_str % data)
 
 
 
