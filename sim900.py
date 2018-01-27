@@ -92,6 +92,8 @@ def file_writer(filename, title_line, formatted_str, buffer):
             if data is None:
                 break
             f.write(formatted_str % data)
+            dprint("DEBUG: file write: ", end='')
+            dprint(formatted_str % data, end='')
 
 
 class SIM900:
@@ -150,7 +152,7 @@ class SIM900:
         self.s_fheader = s_fheader if s_fheader else '' 
         self.ns_fheader = ns_fheader if ns_fheader else ''
         self.s_fstr = s_fstr if s_fstr else None
-        self.ns_fstr = s_fstr if s_fstr None
+        self.ns_fstr = s_fstr if s_fstr else None
 
         # buffers
         self.s_buf = None
