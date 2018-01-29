@@ -100,7 +100,7 @@ class SIM900:
 
     def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
-                             waittime=0, s_tper=100, ns_tper=1000,
+                             waittime=0.001, s_tper=100, ns_tper=1000,
                              s_fname=None, ns_fname=None,
                              s_fheader=None, ns_fheader=None,
                              s_fstr=None, ns_fstr=None):
@@ -149,7 +149,7 @@ class SIM900:
         # log file attributes
         self.s_fname = s_fname if s_fname else None
         self.ns_fname = ns_fname if ns_fname else None
-        self.s_fheader = s_fheader if s_fheader else '' 
+        self.s_fheader = s_fheader if s_fheader else ''
         self.ns_fheader = ns_fheader if ns_fheader else ''
         self.s_fstr = s_fstr if s_fstr else None
         self.ns_fstr = s_fstr if s_fstr else None
@@ -178,6 +178,7 @@ class SIM900:
         for i in range(1, 10):
             self.sendcmd("TERM", port=i, literal="LF")
             self.sendcmd("SNDT", port=i, str_block=makecmd("TERM", literal=0))
+            # self.sendcmd("BAUD", port=i, num=38400)
         self.sendcmd("RPER", num=sum([2 ** i for i in range(1, 0xF)]))
 
     def set_stream_cmd(self, port, cmd, msg_start):
@@ -291,8 +292,10 @@ class SIM900:
 
     def ns_cmd_sender(self):
         while not self.signaled:
+
             for cmd in self.ns_commands:
                 self.sendcmd("SNDT", cmd[0], str_block=cmd[1])
+                time.sleep(0.005)
             time.sleep(self.ns_tper/1000.0)
 
     def start(self):
