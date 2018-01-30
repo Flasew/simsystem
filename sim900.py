@@ -79,7 +79,7 @@ def parse_portmsg(msg):
     else:
         return -1, None
 
-def file_writer(filename, title_line, formatted_str, buffer):
+def file_writer(filename, title_line, formatted_str, buf):
     '''File writing worker function. Buffer is expected to be a queue or a
     Simplequeue.
     '''
@@ -88,22 +88,63 @@ def file_writer(filename, title_line, formatted_str, buffer):
         f.write(title_line)
 
         while True:
-            data = buffer.get()
+            data = buf.get()
             if data is None:
                 break
             f.write(formatted_str % data)
             dprint("DEBUG: file write: ", end='')
             dprint(formatted_str % data, end='')
 
+def file_multi_writer(filename, title_line, formatted_str, bufdict):
+    '''File writing worker function. Buffer is expected to be a queue or a
+    Simplequeue.
+    '''
+    with open(filename, 'w+') as f:
+
+        f.write(title_line)
+
+        stop = False
+        while True:
+            datals = []
+            for key in bufdict.keys():
+                item = bufdict[key].get()
+
+                if item is None:
+                    stop = True
+                    break
+
+                datals.append(item)
+
+            if stop:
+                break
+
+            data = tuple(datals)
+
+            f.write(formatted_str % data)
+            dprint("DEBUG: file write: ", end='')
+            dprint(formatted_str % data, end='')
+
+default_port_baud = {
+    1: 9600,
+    2: 9600,
+    3: 9600,
+    4: 9600,
+    5: 9600,
+    6: 9600,
+    7: 9600,
+    8: 9600,
+    9: 9600
+}
 
 class SIM900:
 
-    def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE,
+    def __init__(self, port, baudrate=115200, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
                              waittime=0.001, s_tper=100, ns_tper=1000,
                              s_fname=None, ns_fname=None,
                              s_fheader=None, ns_fheader=None,
-                             s_fstr=None, ns_fstr=None):
+                             s_fstr=None, ns_fstr=None,
+                             port_baud=default_port_baud):
         '''SIM900 class constructor. Set the serial attributes, and configure the
         stream/non-streaming ports.
 
@@ -116,13 +157,25 @@ class SIM900:
             stopbits {number} -- S-port stop bit (default: {serial.STOPBITS_ONE})
             timeout {number} -- serial port timeout (default: {None})
             waittime {number} -- time to wait for a query command
-            s_port {number} -- port to enable stream, for SIM921. If streaming
-                               is not used, set this value to -1(default: 1)
-            s_func {function} -- Function for streaming process. If set to
-                                 None, will automatically use self.stream_sim921
-                                 with the previous streaming port. (default: {None})
-            s_fname {str} -- file to store streamed data. If none, a file with
+            s_tper {number} -- interval between each streaming read (ms).
+                               This parameter will be send to the device as the
+                               streaming interval
+            ns_tper {number} -- interval between each non-streaming read (ms)
+                                This is controlled by sleep calls within python
+            s_fname {str} -- file to store streamed data. If None, a file with
                             name "YYYYMMDDHHMMstream.csv" will be created
+            ns_fname {str} -- file to store non-streamed data. If none, a file with
+                            name "YYYYMMDDHHMMnostream.csv" will be created
+            s_fheader {str} -- file header line for the streaming log file
+            ns_fheader {str} -- file header line for the non-streaming log file
+            s_fstr {str} -- formatted string for streaming data logging, using
+                            c style format. Should begin with a "%d" for time
+                            followed by an appropriate format for the data.
+            ns_fstr {str} -- formatted string for non streaming data logging, using
+                            c style format. Should begin with a "%d" for time
+                            followed by appropriate format for the data.
+            port_baud {list} -- Default port baud rate for each port on SIM900
+            
         '''
 
         # Deal with the serial port
@@ -136,9 +189,9 @@ class SIM900:
 
         self.waittime = waittime
 
-        # stream / non-stream commands
+        # stream / non-stream commands (see functions)
         self.s_command = []
-        self.ns_commands = []
+        self.ns_commands = {}
 
         # stream time period
         self.s_tper = s_tper
@@ -159,10 +212,16 @@ class SIM900:
         self.ns_buf = None
         self.main_msg = []
 
+        self.port_baud = port_baud
+
         self.configure()
         self.signaled = False
 
     def __del__(self):
+        for i in range(1, 10):
+            self.sendcmd("SNDT", port=i, str_block="*RST")
+        self.sendcmd("*RST")
+
         if self.ser.is_open:
             self.ser.close()
 
@@ -178,33 +237,50 @@ class SIM900:
         for i in range(1, 10):
             self.sendcmd("TERM", port=i, literal="LF")
             self.sendcmd("SNDT", port=i, str_block=makecmd("TERM", literal=0))
-            # self.sendcmd("BAUD", port=i, num=38400)
-        self.sendcmd("RPER", num=sum([2 ** i for i in range(1, 0xF)]))
+            self.sendcmd("SNDT", port=i, str_block=makecmd("BAUD", num=self.port_baud[i]))
+            self.sendcmd("BAUD", i, num=self.port_baud[i])
+        
 
-    def set_stream_cmd(self, port, cmd, msg_start):
+    def set_stream_cmd(self, port, cmd, msg_start, msglen):
         '''Set the streaming port and command. Notice that only ONE port can be
         streaming, so this command will overwrite whatever was in s_command.
+        Command is stored in the format
+            [port, command string, message start byte, message expected length]
 
         Arguments:
             port {int} -- port to stream from
             cmd {str} -- a command that the terminal device can understand and
             turns it into the stream mode.
+            msg_start {int} -- index of where the message will begin. A typical
+                               message return from SIM devices has some fixed
+                               number of meta-data bytes prefixed in front of 
+                               the message (e.g. #2aaXXXX, the #2aa part is the 
+                               prefix), and this number denotes the first position
+                               of message byte.
+            msglen {int} -- expected length of the message, for validity check.
         '''
-        self.s_command = [port, cmd, msg_start]
+        self.s_command = [port, cmd, msg_start, msglen]
 
-    def add_nonstream_cmd(self, port, cmd, msg_start):
+    def add_nonstream_cmd(self, port, cmd, msg_start, msglen):
         '''Add a command to the non-streaming command list. This should
         be a query command. Unlike the non-streaming one, this one can have
         multiple ports.
-        non-stream command also supports multiple commands for one port.
         THe commands are stored as port-list of command dictionary.
+            {port: [command string, message start byte, message expected length]}
 
         Arguments:
             port {int} -- port to stream from
             cmd {str} -- a command that the terminal device can understand and
             turns it into the stream mode.
+            msg_start {int} -- index of where the message will begin. A typical
+                               message return from SIM devices has some fixed
+                               number of meta-data bytes prefixed in front of 
+                               the message (e.g. #2aaXXXX, the #2aa part is the 
+                               prefix), and this number denotes the first position
+                               of message byte.
+            msglen {int} -- expected length of the message, for validity check.
         '''
-        self.ns_commands.append([port, cmd, msg_start])
+        self.ns_commands[port] = [cmd, msg_start, msglen]
 
     def send(self, message):
         '''General purpose send
@@ -255,6 +331,15 @@ class SIM900:
         ns_recv_count = 0
         ns_all_msg = []
 
+        s_miss_count = 0
+        ns_miss_count = 0
+
+        ns_half_buf = {}
+        s_half_buf = ''
+
+        for key in self.ns_buf.keys():
+            ns_half_buf[key] = ''
+
         while not self.signaled:
 
             port, raw_msg = parse_portmsg(self.recv())
@@ -262,7 +347,10 @@ class SIM900:
 
             if port == self.s_command[0]:
                 msg = parse_retstr(raw_msg, self.s_command[2])
-                self.s_buf.put((currtime, msg))
+                if len(msg) == self.s_command[3]:
+                    self.s_buf.put((currtime, msg))
+                else:
+                    s_miss_count += 1
 
             elif port == 0:
                 self.main_msg.append([currtime, msg])
@@ -273,28 +361,42 @@ class SIM900:
 
             else:
                 if ns_recv_count == 0:
-                    ns_all_msg.append(currtime)
+                    self.ns_buf[0].put(currtime)
 
-                ns_all_msg.append(
-                    parse_retstr(raw_msg, self.ns_commands[ns_recv_count][2]))
+                retstr = parse_retstr(raw_msg, self.ns_commands[port][1])
+                if len(retstr) == self.ns_commands[port][2]:
+                    self.ns_buf[port].put(retstr)
+                else:
+                    if len(ns_half_buf[port]) == 0:
+                        ns_half_buf[port] += retstr
+                    else:
+                        ns_half_buf[port] += retstr
+                        if len(ns_half_buf[port]) == self.ns_commands[port][2]:
+                            self.ns_buf[port].put(ns_half_buf[port])
+                        else:
+                            self.ns_buf[port].put("INVALID")
+                            ns_miss_count += 1
+                        ns_half_buf[port] = ''
 
                 ns_recv_count += 1
 
                 if ns_recv_count == len(self.ns_commands):
-                    self.ns_buf.put(tuple(ns_all_msg))
+                    
                     ns_recv_count = 0
-                    ns_all_msg[:] = []
+                    
 
         # put nones for exit
         self.sendcmd("SNDT", self.s_command[0], str_block="SOUT")
         self.s_buf.put(None)
-        self.ns_buf.put(None)
+        for key in self.ns_buf:
+            self.ns_buf[key].put(None)
+        dprint("DEBUG: Stream data miss count: {:d}; non-stream data miss count: {:d}".format(s_miss_count, ns_miss_count))
 
     def ns_cmd_sender(self):
         while not self.signaled:
 
-            for cmd in self.ns_commands:
-                self.sendcmd("SNDT", cmd[0], str_block=cmd[1])
+            for key in self.ns_commands.keys():
+                self.sendcmd("SNDT", key, str_block=self.ns_commands[key][0])
                 time.sleep(0.005)
             time.sleep(self.ns_tper/1000.0)
 
@@ -313,8 +415,14 @@ class SIM900:
         signal.signal(signal.SIGHUP, lambda s, f: self.set_signal())
         signal.signal(signal.SIGTERM, lambda s, f: self.set_signal())
 
+        enable_port_sum = sum([2 ** i for i in self.ns_commands.keys()])+ 2 ** self.s_command[0]
+        self.sendcmd("RPER", num=enable_port_sum)
+        self.sendcmd("RDDR", num=0)
+
         self.s_buf = SimpleQueue()
-        self.ns_buf = SimpleQueue()
+        self.ns_buf = {0: SimpleQueue()}
+        for key in self.ns_commands:
+            self.ns_buf[key] = SimpleQueue()
 
         s_fname = self.s_fname if self.s_fname else "{:s}stream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
         ns_fname = self.ns_fname if self.ns_fname else "{:s}nostream.csv".format(datetime.now().strftime("%Y%m%d%H%M%S"))
@@ -322,7 +430,7 @@ class SIM900:
         s_fwrite_proc = Process(target = \
             lambda: file_writer(s_fname, self.s_fheader, self.s_fstr, self.s_buf))
         ns_fwrite_proc = Process(target = \
-            lambda: file_writer(ns_fname, self.ns_fheader, self.ns_fstr, self.ns_buf))
+            lambda: file_multi_writer(ns_fname, self.ns_fheader, self.ns_fstr, self.ns_buf))
         sort_proc = Process(target = self.sorter)
         ns_proc = Process(target = self.ns_cmd_sender)
 
@@ -350,13 +458,14 @@ class SIM900:
 def main():
     d = SIM900('/dev/ttyUSB0', s_fname="tests.csv", ns_fname="testns.csv")
     d.s_fheader = "Time, TVal\n"
-    d.ns_fheader = "Time, sn4, sn5, sn6\n"
+    d.ns_fheader = "Time, t00, t01, t02, t03, v10, v11, v12, v13, t20, t21, t22, t23\n"
     d.s_fstr = "%d, %s\n"
     d.ns_fstr = "%d, %s, %s, %s\n"
-    d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4)
-    d.add_nonstream_cmd(4, "*IDN?", 4)
-    d.add_nonstream_cmd(5, "*IDN?", 4)
-    d.add_nonstream_cmd(6, "*IDN?", 4)
+    d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4, 13)
+    d.add_nonstream_cmd(4, "VOLT? 0", 4, 54)
+    d.add_nonstream_cmd(5, "VOLT? 0", 4, 56)
+    d.add_nonstream_cmd(6, "VOLT? 0", 4, 56)
+
     d.start()
 
 # if __name__ == '__main__':
