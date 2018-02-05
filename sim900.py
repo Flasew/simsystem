@@ -124,27 +124,28 @@ def file_multi_writer(filename, title_line, formatted_str, bufdict):
             dprint("DEBUG: file write: ", end='')
             dprint(formatted_str % data, end='')
 
-default_port_baud = {
-    1: 9600,
-    2: 9600,
-    3: 9600,
-    4: 9600,
-    5: 9600,
-    6: 9600,
-    7: 9600,
-    8: 9600,
-    9: 9600
-}
+# default_port_baud = {
+#     1: 9600,
+#     2: 9600,
+#     3: 9600,
+#     4: 9600,
+#     5: 9600,
+#     6: 9600,
+#     7: 9600,
+#     8: 9600,
+#     9: 9600
+# }
 
 class SIM900:
 
+    mkcmd = makecmd
     def __init__(self, port, baudrate=115200, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
                              waittime=0.001, s_tper=100, ns_tper=1000,
                              s_fname=None, ns_fname=None,
                              s_fheader=None, ns_fheader=None,
-                             s_fstr=None, ns_fstr=None,
-                             port_baud=default_port_baud):
+                             s_fstr=None, ns_fstr=None):
+                            #port_baud=default_port_baud):
         '''SIM900 class constructor. Set the serial attributes, and configure the
         stream/non-streaming ports.
 
@@ -212,7 +213,7 @@ class SIM900:
         self.ns_buf = None
         self.main_msg = []
 
-        self.port_baud = port_baud
+        # self.port_baud = port_baud
 
         self.configure()
         self.signaled = False
@@ -237,8 +238,8 @@ class SIM900:
         for i in range(1, 10):
             self.sendcmd("TERM", port=i, literal="LF")
             self.sendcmd("SNDT", port=i, str_block=makecmd("TERM", literal=0))
-            self.sendcmd("SNDT", port=i, str_block=makecmd("BAUD", num=self.port_baud[i]))
-            self.sendcmd("BAUD", i, num=self.port_baud[i])
+            # self.sendcmd("SNDT", port=i, str_block=makecmd("BAUD", num=self.port_baud[i]))
+            # self.sendcmd("BAUD", i, num=self.port_baud[i])
         
 
     def set_stream_cmd(self, port, cmd, msg_start, msglen):
@@ -346,14 +347,27 @@ class SIM900:
             currtime = int(round(time.time() * 1000))
 
             if port == self.s_command[0]:
-                msg = parse_retstr(raw_msg, self.s_command[2])
-                if len(msg) == self.s_command[3]:
-                    self.s_buf.put((currtime, msg))
+                retstr = parse_retstr(raw_msg, self.s_command[2])
+                if len(retstr) == self.s_command[3]:
+                    self.s_buf.put((currtime, retstr))
                 else:
-                    s_miss_count += 1
+                    s_half_buf += retstr
+                    if len(s_half_buf) == self.s_command[3]:
+                        self.s_buf.put(s_half_buf)
+                    else:
+                        if len(s_half_buf) == 0:
+                            s_half_buf += retstr
+                        else:
+                            s_half_buf += retstr
+                            if len(s_half_buf) == self.s_command[3]:
+                                self.s_buf.put(s_half_buf)
+                            else:
+                                self.s_buf.put("INVALID")
+                                s_miss_count += 1
+                            s_half_buf = ''
 
             elif port == 0:
-                self.main_msg.append([currtime, msg])
+                self.main_msg.append([currtime, raw_msg])
 
             elif port == -1:
                 eprint("WARNING: Serial port timed out")
@@ -462,9 +476,9 @@ def main():
     d.s_fstr = "%d, %s\n"
     d.ns_fstr = "%d, %s, %s, %s\n"
     d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4, 13)
-    d.add_nonstream_cmd(4, "VOLT? 0", 4, 54)
-    d.add_nonstream_cmd(5, "VOLT? 0", 4, 56)
-    d.add_nonstream_cmd(6, "VOLT? 0", 4, 56)
+    d.add_nonstream_cmd(4, "TVAL? 0", 4, 54)
+    d.add_nonstream_cmd(5, "TVAL? 0", 4, 54)
+    d.add_nonstream_cmd(6, "TVAL? 0", 4, 54)
 
     d.start()
 
