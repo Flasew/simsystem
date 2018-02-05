@@ -462,9 +462,9 @@ def main():
     d.s_fstr = "%d, %s\n"
     d.ns_fstr = "%d, %s, %s, %s\n"
     d.set_stream_cmd(1, makecmd("TVAL?", num=0), 4, 13)
-    d.add_nonstream_cmd(4, "VOLT? 0", 4, 54)
-    d.add_nonstream_cmd(5, "VOLT? 0", 4, 56)
-    d.add_nonstream_cmd(6, "VOLT? 0", 4, 56)
+    d.add_nonstream_cmd(4, "TVAL? 0", 4, 54)
+    d.add_nonstream_cmd(5, "TVAL? 0", 4, 56)
+    d.add_nonstream_cmd(6, "TVAL? 0", 4, 56)
 
     d.start()
 
