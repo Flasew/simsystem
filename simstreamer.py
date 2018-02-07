@@ -9,6 +9,7 @@ from datetime import datetime
 from multiprocessing import Process, ProcessError, Lock
 from multiprocessing.queues import SimpleQueue
 from simdev import SIM900, SIM921
+from atomic import Atomic
 
 DEBUG = True
 
@@ -21,33 +22,41 @@ def dprint(*args, **kwargs):
     if DEBUG:
         eprint(*args, **kwargs)
 
-def file_writer(filename, title_line, formatted_str, buf):
-    '''File writing worker function. Buffer is expected to be a queue or a
-    Simplequeue.
-    '''
-    with open(filename, 'w+') as f:
+# def file_writer(filename, title_line, formatted_str, buf):
+#     '''File writing worker function. Buffer is expected to be a queue or a
+#     Simplequeue.
+#     '''
+#     with open(filename, 'w+') as f:
 
-        f.write(title_line)
+#         f.write(title_line)
 
-        while True:
-            data = buf.get()
-            if data is None:
-                break
-            f.write(formatted_str % data)
-            dprint("DEBUG: file write: ", end='')
-            dprint(formatted_str % data, end='')
+#         while True:
+#             data = buf.get()
+#             if data is None:
+#                 break
+#             f.write(formatted_str % data)
+#             dprint("DEBUG: file write: ", end='')
+#             dprint(formatted_str % data, end='')
+
+def mtime():
+    return int(round(time.time() * 1000))
 
 class SimStreamer(object):
 
     def __init__(self, sim900=None, sim921=None, 
-                       fname900=None, fname921=None,
-                       cmd900=None, cmd921=None):
+                       fname900='/dev/stdout', fname921='/dev/stdout',
+                       cmd900=[], cmd921=''):
         self.sim900 = sim900
         self.sim921 = sim921
         self.fname900 = fname900
         self.fname921 = fname921
-        self.cmd900 = cmd900
+        self.cmd900 = cmd900        #list of dictionary
         self.cmd921 = cmd921
+
+        self.proc900 = None
+        self.proc921 = None
+
+        self.latest900data = Atomic('', proc=True)
 
         self.signaled = False
 
@@ -56,25 +65,133 @@ class SimStreamer(object):
         """
         self.signaled = True
 
-    def add_nonstream_cmd(self, port, cmd, msg_start, msglen):
-        '''Add a command to the non-streaming command list. This should
-        be a query command. Unlike the non-streaming one, this one can have
-        multiple ports.
-        THe commands are stored as port-list of command dictionary.
-            {port: [command string, message start byte, message expected length]}
+    def add_cmd900(self, port, cmd):
+        '''Add a command to the non-streaming command list.
 
         Arguments:
             port {int} -- port to stream from
-            cmd {str} -- a command that the terminal device can understand and
-            turns it into the stream mode.
-            msg_start {int} -- index of where the message will begin. A typical
-                               message return from SIM devices has some fixed
-                               number of meta-data bytes prefixed in front of 
-                               the message (e.g. #2aaXXXX, the #2aa part is the 
-                               prefix), and this number denotes the first position
-                               of message byte.
-            msglen {int} -- expected length of the message, for validity check.
+            cmd {str} -- a command that the terminal device can understand 
         '''
-        self.ns_commands[port] = [cmd, msg_start, msglen]
+        self.cmd900.append({'port': port, 'cmd': cmd})
 
     def sim900_proc(self):
+        dprint('DEBUG: sim900 process started')
+        with open(self.fname900, 'w+') as f:
+
+            while not self.signaled:
+
+                writecache = [mtime()]
+
+                for req in self.cmd900:
+
+                    self.sim900.pconnect(req['port'])
+                    readout = self.sim900.query(req['cmd']).rstrip()
+                    if len(readout) == 0:
+                        readout = 'TIMEOUT'
+                    writecache.append(readout)
+                    self.sim900.pdisconnect()
+
+                if self.proc921:
+                    dprint('DEBUG: Before atomic access on latest900data')
+                    writecache.append(self.latest900data.value)
+                    dprint('DEBUG: Before atomic access on latest900data')
+
+                for i in range(len(writecache)):
+                    if i != len(writecache) - 1:
+                        f.write(str(writecache[i]) + ', ')
+                    else:
+                        f.write(writecache[i])
+                f.write('\n')
+
+            time.sleep(self.sim900.tper / 1000.0)
+        dprint('DEBUG: sim900 process exited')
+
+
+    def sim921_proc(self):
+        dprint('DEBUG: sim921 process started')
+        self.sim921.send(self.cmd921)
+
+        with open(self.fname921, 'w+') as f:
+
+            while not self.signaled:
+
+                readout = self.sim921.recv().rstrip()
+                currtime = mtime()
+
+                if len(readout) == 0:
+                    readout = 'TIMEOUT'
+
+                dprint('DEBUG: Before atomic set on latest900data')
+                self.latest900data.value = readout
+                dprint('DEBUG: After atomic set on latest900data')
+                f.write(str(currtime))
+                f.write(', ' + readout + '\n')
+
+            self.sim921.send('SOUT')
+        dprint('DEBUG: sim921 process exited')
+
+
+    def start(self, run900=True, run921=True, block=True):
+        '''Start streaming
+        '''
+        self.signaled = False
+        if block:
+            # signal handling.
+            # stores the original signals
+            original_sigint = signal.getsignal(signal.SIGINT)
+            original_sighup = signal.getsignal(signal.SIGHUP)
+            original_sigterm = signal.getsignal(signal.SIGTERM)
+
+            # set the new signal handlers
+            signal.signal(signal.SIGINT, lambda s, f: self.set_signal())
+            signal.signal(signal.SIGHUP, lambda s, f: self.set_signal())
+            signal.signal(signal.SIGTERM, lambda s, f: self.set_signal())
+
+        if run921:
+            self.proc921 = Process(target=self.sim921_proc)
+            self.proc921.start()
+
+        if run900:
+            self.proc900 = Process(target=self.sim900_proc)
+            self.proc900.start()
+
+        
+        
+        if block:
+            if run900:
+                self.proc900.join()
+            if run921:
+                self.proc921.join()
+
+            self.proc900 = None
+            self.proc921 = None
+
+            # restore the original handlers
+            signal.signal(signal.SIGINT, original_sigint)
+            signal.signal(signal.SIGHUP, original_sighup)
+            signal.signal(signal.SIGTERM, original_sigterm)
+
+    def stop(self):
+
+        self.set_signal()
+
+        if self.proc900:
+            self.proc900.join()
+        if self.proc921:
+            self.proc921.join()
+
+        self.proc900 = None
+        self.proc921 = None
+
+
+def main():
+
+    cmd900 = [
+        {'port': 4, 'cmd': 'TVAL? 0'},
+        {'port': 5, 'cmd': 'TVAL? 0'},
+        {'port': 6, 'cmd': 'TVAL? 0'}
+    ]
+    d = SimStreamer(SIM900('/dev/ttyUSB0'), None,#SIM921('/dev/ttyUSB1'),
+                    'test900.csv', 'test921.csv',
+                    cmd900,'TVAL? 0')
+    d.start(run921=False)

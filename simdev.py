@@ -45,13 +45,14 @@ def parse_portmsg(msg):
 class SIMserial(object):
     def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
-                             waittime=0.001, tper=1000):
+                             rtscts=False, waittime=0.001, tper=1000):
 
         # Deal with the serial port
         self.ser = serial.Serial(port, baudrate=baudrate,
                                        parity=parity,
                                        stopbits=stopbits,
-                                       timeout=timeout)
+                                       timeout=timeout,
+                                       rtscts=rtscts)
 
         if not self.ser.is_open:
             self.ser.open()
@@ -123,6 +124,8 @@ class SIMserial(object):
 
 class SIM900(SIMserial):
 
+    ESCSTR = 'xyz'
+
     def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
                              waittime=0.001, tper=1000):
@@ -153,12 +156,18 @@ class SIM900(SIMserial):
         message = SIM900.makecmd(command, port, str_block, literal, num)
         return self.query(message)
 
+    def pconnect(self, port):
+        self.sendcmd('CONN', port, SIM900.ESCSTR)
+
+    def pdisconnect(self):
+        self.send(SIM900.ESCSTR)
+
 class SIM921(SIMserial):
 
-    def __init__(self, port, timeout=0.5, waittime=0.001, tper=1000):
+    def __init__(self, port, timeout=0.5, waittime=0.001, tper=105):
 
         # Deal with the serial port
-        super(SIM921, self).__init__(port, timeout=timeout, waittime=waittime, tper=tper)
+        super(SIM921, self).__init__(port, timeout=timeout, waittime=waittime, tper=tper, rtscts=True)
         self.configure()
 
     def __del__(self):
