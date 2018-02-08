@@ -62,6 +62,7 @@ class SIMserial(object):
         self.tper = tper
 
     def __del__(self):
+        self.send("*RST")
         if self.ser.is_open:
             self.ser.close()
 
@@ -126,12 +127,12 @@ class SIM900(SIMserial):
 
     ESCSTR = 'xyz'
 
-    def __init__(self, port, baudrate=9600, parity=serial.PARITY_NONE,
+    def __init__(self, port, baudrate=115200, parity=serial.PARITY_NONE,
                              stopbits=serial.STOPBITS_ONE, timeout=0.5,
                              waittime=0.001, tper=1000):
 
         # Deal with the serial port
-        super(SIM900, self).__init__(port, baudrate, parity, stopbits, timeout, waittime, tper)
+        super(SIM900, self).__init__(port, baudrate, parity, stopbits, timeout, False, waittime, tper)
         self.configure()
 
 
@@ -175,7 +176,7 @@ class SIM921(SIMserial):
             self.ser.close()
 
     def configure(self):
-        self.send("TERM 0")
+        self.send("TERM LF")
         self.send(SIM921.makecmd("TPER", num=self.tper))
 
     @staticmethod

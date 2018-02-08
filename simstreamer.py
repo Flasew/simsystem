@@ -4,12 +4,14 @@ import sys
 import time
 import signal
 import numpy as np
+import ctypes
+import copy
 from sys import stderr
 from datetime import datetime
-from multiprocessing import Process, ProcessError, Lock
+from multiprocessing import Process, ProcessError, RLock, Manager
 from multiprocessing.queues import SimpleQueue
 from simdev import SIM900, SIM921
-from atomic import Atomic
+
 
 DEBUG = True
 
@@ -56,7 +58,8 @@ class SimStreamer(object):
         self.proc900 = None
         self.proc921 = None
 
-        self.latest900data = Atomic('', proc=True)
+        self.lock = RLock()
+        self.latest921data = multiprocessing.Value(ctypes.c_double, 0)
 
         self.signaled = False
 
@@ -92,9 +95,7 @@ class SimStreamer(object):
                     self.sim900.pdisconnect()
 
                 if self.proc921:
-                    dprint('DEBUG: Before atomic access on latest900data')
-                    writecache.append(self.latest900data.value)
-                    dprint('DEBUG: Before atomic access on latest900data')
+                    writecache.append("{:+.6E}".format(self.latest921data.value))
 
                 for i in range(len(writecache)):
                     if i != len(writecache) - 1:
@@ -121,13 +122,13 @@ class SimStreamer(object):
                 if len(readout) == 0:
                     readout = 'TIMEOUT'
 
-                dprint('DEBUG: Before atomic set on latest900data')
-                self.latest900data.value = readout
-                dprint('DEBUG: After atomic set on latest900data')
+                self.latest921data.value = float(readout)
+                
                 f.write(str(currtime))
                 f.write(', ' + readout + '\n')
 
             self.sim921.send('SOUT')
+
         dprint('DEBUG: sim921 process exited')
 
 
@@ -191,7 +192,7 @@ def main():
         {'port': 5, 'cmd': 'TVAL? 0'},
         {'port': 6, 'cmd': 'TVAL? 0'}
     ]
-    d = SimStreamer(SIM900('/dev/ttyUSB0'), None,#SIM921('/dev/ttyUSB1'),
+    d = SimStreamer(SIM900('/dev/ttyUSB3'), SIM921('/dev/ttyUSB2'),
                     'test900.csv', 'test921.csv',
                     cmd900,'TVAL? 0')
-    d.start(run921=False)
+    d.start()
