@@ -10,7 +10,7 @@ from sys import stderr
 from datetime import datetime
 from multiprocessing import Process, ProcessError, RLock, Manager
 from multiprocessing.queues import SimpleQueue
-from simdev import SIM900, SIM921
+from simframe import SIM900, SIM921
 
 
 DEBUG = True
