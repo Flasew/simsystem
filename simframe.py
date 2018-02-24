@@ -207,6 +207,9 @@ class SIM900(SIMFrame):
                 mod.connected = False
         self.connected_to = 0
 
+    def get_full_idn(self):
+        return self.query('*IDN?')
+
 
 class SIM921(SIMFrame):
     """

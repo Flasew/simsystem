@@ -78,32 +78,39 @@ class SIMModule(object):
             self.frame.pdisconnect()
             self.connected = False
 
+        return None
+
 
 class SIM921(SIMModule):
     """
-    SIM921 class represents an sim921 module connected to the mainframe.
+    SIM921 class represents an fast_dev module connected to the mainframe.
     """
 
     def setExcitationOnOff(self, state):
         self.send('EXON {0}'.format(state))
+        return self
 
     def setExcitationRange(self, e_int):
         self.send('EXCI {0}'.format(e_int))
+        return self
 
     def queryExcitation(self):
         return self.query('EXON?')
 
     def setResistanceRange(self, r_int):
         self.send('RANG {0}'.format(r_int))
+        return self
 
     def setExcitationFreq(self, freq):
         self.send('FREQ {0}'.format(freq))
+        return self
 
     def getExcitationFreq(self):
         return self.query('FREQ?')
 
     def setTimeConstant(self, tau):
         self.send('TCON {0}'.format(tau))
+        return self
 
     def getTimeConstant(self):
         return self.query('TCON?')
@@ -137,5 +144,6 @@ class SIM925(SIMModule):
     SIM925 class represents an SIM925 module connected to the main frame.
     """
 
-    def SIM925switchMUX(self,channel):
+    def switchMUX(self,channel):
         self.send('CHAN {0}'.format(channel))
+        return self

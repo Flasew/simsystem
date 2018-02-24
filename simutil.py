@@ -27,3 +27,9 @@ def dprint(*args, **kwargs):
 # millisecond time
 def mtime():
     return int(round(time.time() * 1000))
+
+
+# write to a file
+def fwrite(fileName, writeStr, writeMethod):
+    with open(fileName, writeMethod) as f:
+        f.write(writeStr)
