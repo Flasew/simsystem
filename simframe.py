@@ -99,118 +99,6 @@ class SIMFrame(object):
         return message
 
 
-class SIM900(SIMFrame):
-
-    def __init__(self, port, baudrate=115200, parity=serial.PARITY_NONE,
-                 stopbits=serial.STOPBITS_ONE, timeout=0.5, waittime=0.001):
-
-        # Deal with the serial port
-        super(SIM900, self).__init__(port, baudrate, parity, stopbits, timeout, False, waittime)
-        self.configure()
-
-        # maps each port to a device. Defaulted to none, need to use setter to set it.
-        # use getter and setter to modify.
-        self._modules = {key: None for key in range(1, 11)}
-
-        # Which device that the main frame is currently on. 0 for not on anything.
-        self.connected_to = 0
-
-    def configure(self):
-        """Set all termination to LF. This is forced throughout the program.
-        """
-        self.sendcmd("RPER", num=0)
-        for i in range(1, 10):
-            self.sendcmd("TERM", port=i, literal="LF")
-            self.sendcmd("SNDT", port=i, str_block=SIM900.mkcmd("TERM", literal=0))
-
-    def configure_module(self, port):
-        """
-        Configure a SIM module device according to communication parameters set on the device on port
-        :param port: port of SIMModule object to be configured
-        :return: no return
-        """
-        self.sendcmd("SNDT", port=port, str_block=SIM900.mkcmd("BAUD", num=self._modules[port].baudrate))
-        self.sendcmd("BAUD", port=port, num=self._modules[port].baudrate)
-        self.connect_module(port).configure()
-
-    def connect_module(self, port):
-        """
-        Get the device connected at a port. The returned device will be connected directly via the "CONN" command.
-        :param port: Port of the device that it is on.
-        :return: a SIMModule object corresponding the the device.
-        """
-        if self.connected_to == port:
-            eprint("Module {:s} on port {:d} is already connected.".format(self._modules[port].name, port))
-            return self._modules[port]
-        elif self.connected_to != port and self.connected_to != 0:
-            eprint("Error: Already connected to another module.")
-            return None
-        if self._modules[port] is None:
-            eprint("Error: No device is connected on port {:d}.".format(port))
-            return None
-        else:
-            self.pconnect(port)
-            dprint("Connected to port {:d}.".format(port))
-            self._modules[port].connected = True
-            return self._modules[port]
-
-    def set_module(self, port, device, force_set=False):
-        """
-        Set the device on a port. If a device already exist on that port, unless force_set is specified, returns false.
-        Device will be set according to the device parameter.
-        :param port: port of the device to be set
-        :param device: SIMModule object to be set
-        :param force_set: if true, will ignore the current device on this port.
-        :return: True on success, false otherwise
-        """
-        if not force_set:
-            if self._modules[port] is not None:
-                eprint("Error: Device {:s} already exist on port {:d}".format(self._modules[port].name, port))
-                return False
-        else:
-            self._modules[port] = device
-            self.configure_module(device)
-            return True
-
-    def sendcmd(self, command, port=None, str_block=None, literal=None, num=None):
-        """Wrapper for mkcmd-send
-        """
-        message = SIM900.mkcmd(command, port, str_block, literal, num)
-        self.send(message)
-
-    def querycmd(self, command, port=None, str_block=None, literal=None, num=None):
-        """Wrapper for mkcmd-query
-        """
-        message = SIM900.mkcmd(command, port, str_block, literal, num)
-        return self.query(message)
-
-    def pconnect(self, port):
-        self.sendcmd('CONN', port, ESCSTR)
-        self.connected_to = port
-
-    def pdisconnect(self):
-        """
-        Disconnect from the currently connected port.
-        :return: no return
-        """
-        self.send(ESCSTR)
-        self.connected_to = 0
-
-    def disconnect_reset(self):
-        """
-        Only use this one for force disconnect!
-        :return: no return
-        """
-        self.send(ESCSTR)
-        for mod in self._modules.values():
-            if mod is not None:
-                mod.connected = False
-        self.connected_to = 0
-
-    def get_full_idn(self):
-        return self.query('*IDN?')
-
-
 class SIM921(SIMFrame):
     """
     Directly connected, frame-level SIM921. This kind of connection indicates that SIM 921 is used for
@@ -220,7 +108,7 @@ class SIM921(SIMFrame):
     def __init__(self, port, timeout=0.5, waittime=0.001, tper=105):
 
         # Deal with the serial port
-        super(SIM921, self).__init__(port, timeout=timeout, waittime=waittime , rtscts=True)
+        super(SIM921, self).__init__(port, baudrate=9600, timeout=timeout, waittime=waittime , rtscts=True)
         self.tper = tper
         self.configure()
 
@@ -231,6 +119,35 @@ class SIM921(SIMFrame):
     def configure(self):
         self.send("TERM LF")
         self.send(SIM921.mkcmd("TPER", num=self.tper))
+
+    def setExcitationOnOff(self, state):
+        self.send('EXON {0}'.format(state))
+        return self
+
+    def setExcitationRange(self, e_int):
+        self.send('EXCI {0}'.format(e_int))
+        return self
+
+    def queryExcitation(self):
+        return self.query('EXON?')
+
+    def setResistanceRange(self, r_int):
+        self.send('RANG {0}'.format(r_int))
+        return self
+
+    def setExcitationFreq(self, freq):
+        self.send('FREQ {0}'.format(freq))
+        return self
+
+    def getExcitationFreq(self):
+        return self.query('FREQ?')
+
+    def setTimeConstant(self, tau):
+        self.send('TCON {0}'.format(tau))
+        return self
+
+    def getTimeConstant(self):
+        return self.query('TCON?')
 
     @staticmethod
     def mkcmd(command, str_block=None, literal=None, num=None, port=0):

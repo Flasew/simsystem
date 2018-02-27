@@ -8,7 +8,7 @@ print 'SIMinterface port =', SIM900devicePort
 
 #devicePort = '/dev/ttyUSB0' #USB to serial device
 escapeString = 'xyz' #some random string of letters that won't ever look like a command
-serialBaudRate = 9600 #default for the 922
+serialBaudRate = 115200 #default for the 922
 serialTimeout = 1
 
 responseWaitTime = 0.25 #seconds

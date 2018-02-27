@@ -26,7 +26,8 @@ If you need more info on this script you can either:
 #                                   MAIN                                      #
 #-----------------------------------------------------------------------------#
 #-----------------------------------------------------------------------------#
-
+from simstreamer import SimStreamer
+from simframe import SIM921
 
 def main():
     # Setup some useful path variables
@@ -46,14 +47,22 @@ def main():
     # Load sensor names and calibration file names from file
     (sensors, calibrationFile) = \
         loadSensorNamesAndCalFiles(sensorPath + opts.sensorAndCalNamesFile,
-        sensorPath, opts.nMux + 4*opts.nDiodeMod)
+        sensorPath, opts.nMux + 4*opts.nDiodeMod + 1)
     # Once the USB port is checked and loaded we can import SIMinterface
     from SIMinterface import SIMinterface
     time.sleep(.1)
     # Setup data files and write the file headers
-    (dataFile, dataFileRaw) = initDataFile(opts, basePath, sensors)
+    (dataFile, dataFileRaw, dataFileFast, dataFileRawFast) = \
+        init_data_file(opts, basePath, sensors)
     SIM = SIMinterface()
+
+    fast_dev = SIM921(opts.fastUSBport)
+    streamer = SimStreamer(sim921=fast_dev, fname921=dataFileFast,
+                           fname921raw=dataFileRawFast, cmd921='RVAL? 0',
+                           interp_data=np.loadtxt(calibrationFile[-1], skiprows=4))
+
     time.sleep(.2)
+
 
     try:
         # PTC SIM900 mainframe full device ID:
@@ -67,7 +76,7 @@ def main():
         SIM.connectToMainframePort(0)
         SIMid = SIM.getFullDeviceID()
         time.sleep(.2)
-        if SIMid != 'Stanford_Research_Systems,SIM900,s/n130343,ver3.6':
+        if SIMid != 'Stanford_Research_Systems,SIM900,s/n130796,ver3.6':
             print 'Failed to connect to SIM900. Check device ID, USB port, ' \
                 'or try power cycling.'
             print 'Device ID:', SIM.getFullDeviceID()
@@ -79,6 +88,20 @@ def main():
         print 'Excitation frequency:', SIM.SIM921getExcitationFreq(), 'Hz\n'
         SIM.SIM921setTimeConstant(opts.tau921)
         print 'Time constant:', SIM.SIM921getTimeConstant(), '\n'
+
+        # calibrate sim921 fast data
+        fast_dev.setExcitationFreq(opts.freq921)
+        fast_dev.setTimeConstant(opts.tau921)
+        fast_dev.setResistanceRange(opts.resistanceRangeFast)
+        if opts.exciteRange921 == -1:
+            SIM.SIM921setExcitationRange(6)
+
+        # If we have specified a constant excitation range use that
+        elif opts.exciteRange921 != -1:
+            print 'Fixed excitation chosen: ' + str(opts.exciteRange921)
+            fast_dev.setExcitationRange(opts.exciteRange921)
+
+        streamer.start_kb_listener()
 
         # Initialize variables for the first iteration. The excitation and
         # resistance ranges are autoset after the first iteration. For the first
@@ -184,10 +207,20 @@ def main():
             # Save temperature data to file
             temperatureDataStr = formatDataStr(temperatureData)
             writeToFile(dataFile, temperatureDataStr, 'a')
+
+            if (streamer.proc_fast_dev):
+                writeToFile(dataFile, "{:+.6E}".format(streamer.latest_fast_data.value), 'a')
+            else:
+                writeToFile(dataFile, "FAST_DEV_OFF", 'a')
+
             # Save raw data to file if desired
             if opts.SAVE_RAW == True:
                 rawDataStr = formatDataStr(rawData)
                 writeToFile(dataFileRaw, rawDataStr, 'a')
+                if (streamer.proc_fast_dev):
+                    writeToFile(dataFile, "{:+.6E}".format(streamer.latest_fast_data_raw.value), 'a')
+                else:
+                    writeToFile(dataFile, "FAST_DEV_OFF", 'a')
             FIRST_ITERATION = False
     except KeyboardInterrupt:
         print '\nReceived interrupt - exiting.'
@@ -196,6 +229,8 @@ def main():
         sys.exit()
     finally:
         SIM.closeSerial()
+        streamer.stop()
+        streamer.stop_kb_listener()
 
 #-----------------------------------------------------------------------------#
 #-----------------------------------------------------------------------------#
@@ -238,6 +273,14 @@ def parseOptions(basePath):
         dest = 'USBport',
         action = 'store',
         default = '/dev/ttyUSB0')
+
+    parser.add_option('--fastUSBport',
+        help = 'SIM921 fast streaming device device port string. Default = %default ' \
+        'for a linux computer. Windows computers want something like ' \
+        '\'\\\\.\\COM5\'.',
+        dest = 'fastUSBport',
+        action = 'store',
+        default = '/dev/ttyUSB1')
 
     parser.add_option('--dataFileName',
         help = 'Data file name (do not specify extension, appends \'.txt\' ' \
@@ -298,6 +341,13 @@ def parseOptions(basePath):
         nargs = 8,
         default = (6, 6, 6, 6, 6, 6, 6, 6, 6),
         type = int)
+
+    parser.add_option('--resistanceRangeFast',
+          help='fast data resistance range (default = %default)',
+          dest='resistanceRangeFast',
+          action='store',
+          default=6,
+          type=int)
 
     parser.add_option('--921excitationFrequency',
         help = 'SIM921 excitation frequency (1.95-61.1 Hz). Defualt = %defualt Hz',
@@ -439,6 +489,9 @@ def loadSensorNamesAndCalFiles(fileName, sensorPath, nSensors):
             calFileNames = text[1].split(',')
         for i in range(0, len(calFileNames)):
             calFileNames[i] = sensorPath + calFileNames[i]
+        print 'len(sensorNames): ', len(sensorNames)
+        print 'len(calfileNames): ', len(calFileNames)
+        print 'nSensors: ', nSensors
         # Check for errors in the number of expected calibration files and/or
         # sensors
         if len(sensorNames) != nSensors:
@@ -466,7 +519,7 @@ def loadSensorNamesAndCalFiles(fileName, sensorPath, nSensors):
 ###############################################################################
 # FUNCTION: Initialize data file and write file header
 
-def initDataFile(opts, basePath, sensors):
+def init_data_file(opts, basePath, sensors):
     fileNames = os.listdir(basePath + '/Data/')
     files = [basePath + '/Data/' + s for s in fileNames]
     files = sorted(files, key = os.path.getctime)
@@ -481,24 +534,39 @@ def initDataFile(opts, basePath, sensors):
             time.strftime("%H:%M:%S") + '\nRAW SENSOR UNITS FILE' \
             '\n________________________________\n'
         headerStrRaw = headerStrRaw + 'Time,' + ','.join(sensors) + '\n'
+
+        dataFileFast = basePath + '/Data/' + opts.dataFileName + 'FAST.txt'
+        headerStrFast = 'Date: ' + time.strftime("%Y/%m/%d") + ', Time: ' + \
+            time.strftime("%H:%M:%S") + '\n________________________________\n'
+        headerStrFast = headerStrFast + 'Time,' + sensors[-1] + '\n'
+        dataFileRawFast = basePath + '/Data/' + opts.dataFileName + 'RAWFAST.txt'
+        headerStrRawFast = 'Date: ' + time.strftime("%Y/%m/%d") + ', Time: ' + \
+            time.strftime("%H:%M:%S") + '\nRAW SENSOR UNITS FILE' \
+            '\n________________________________\n'
+        headerStrRawFast = headerStrRawFast + 'Time,' + sensors[-1] + '\n'
+
         if opts.SAVE_RAW == True:
+            writeToFile(dataFileFast, headerStrFast, 'w')
+            writeToFile(dataFileRawFast, headerStrRawFast, 'w')
             writeToFile(dataFile, headerStr, 'w')
             writeToFile(dataFileRaw, headerStrRaw, 'w')
         else:
+            writeToFile(dataFileFast, headerStrFast, 'w')
             writeToFile(dataFile, headerStr, 'w')
         if len(files) == 0 and opts.NEWFILE == False:
             print 'No existing data file to append to and newFile = 0. ' \
                 'Created data file: ' + dataFile
+
     elif len(files) != 0 and opts.NEWFILE == False:
         lastFile = files[-1]
-        if lastFile[-7:] == 'RAW.txt':
-            dataFileRaw = lastFile
-            dataFile = dataFileRaw.strip('RAW.txt') + '.txt'
-        else:
-            dataFile = lastFile
-            dataFileRaw = dataFile.strip('.txt') + 'RAW.txt'
+    
+        dataFile = lastFile.rstrip('.txt').rstrip('FAST').rstrip('RAW') + '.txt'
+        dataFileRaw = dataFile.strip('.txt') + 'RAW.txt'
+        dataFileFast = dataFile.strip('.txt') + 'FAST.txt'
+        dataFileRawFast = dataFile.strip('.txt') + 'RAWFAST.txt'
+        
         print 'Appending data to: ' + dataFile
-    return (dataFile, dataFileRaw)
+    return (dataFile, dataFileRaw, dataFileFast, dataFileRawFast)
 
 ###############################################################################
 ###############################################################################
