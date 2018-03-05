@@ -41,15 +41,6 @@ class SimStreamer(object):
         dprint("Setting Signal...")
         self.signaled = True
 
-    
-    def kb_insert_fast_dev(self, key):
-        """callback function to insert the fastdata streaming."""
-        if key == keyboard.Key.f9:
-
-            eprint("Toggle fast data: ON")
-            self.signaled = False
-            self.proc_fast_dev = Process(target=self.fast_dev_proc)
-            self.proc_fast_dev.start()
 
     def fast_dev_proc(self):
         dprint('DEBUG: fast_dev process started')
@@ -58,28 +49,66 @@ class SimStreamer(object):
         with open(self.fname_fast_dev, 'a+') as f, open(self.fname_fast_dev_raw, 'a+') as fr:
 
             while not self.signaled:
+                try:
+                    readout = self.fast_dev.recv().rstrip()
+                    currtime = mtime()
 
-                readout = self.fast_dev.recv().rstrip()
-                currtime = mtime()
+                    try:
+                        if len(readout) == 0:
+                            readout = '-1'
+                            interp = -1
+                        else:
+                            interp = np.interp(float(readout),self.calMeasured,self.calTemp)
 
-                if len(readout) == 0:
-                    readout = '-1'
-                    interp = -1
-                else:
-                    interp = np.interp(float(readout),self.calMeasured,self.calTemp)
+                    except:
+                        readout = "nan"
+                        interp = float("nan")
 
-                self.latest_fast_data.value = float(interp)
-                self.latest_fast_data_raw.value = float(readout)
-                
-                f.write(str(currtime))
-                f.write(', ' + "{:+.6E}".format(interp) + '\n')
-                fr.write(str(currtime))
-                fr.write(', ' + readout + '\n')
+                    self.latest_fast_data.value = float(interp)
+                    self.latest_fast_data_raw.value = float(readout)
+
+                    f.write(str(currtime))
+                    f.write(', ' + "{:+.6E}".format(interp) + '\n')
+                    fr.write(str(currtime))
+                    fr.write(', ' + readout + '\n')
+                except KeyboardInterrupt:
+                    break
 
 
             self.fast_dev.send('SOUT')
 
+
         dprint('DEBUG: fast_dev process exited')
+
+    def start(self):
+        '''Start streaming
+        '''
+        self.signaled = False
+
+        # # signal handling.
+        # # stores the original signals
+        # original_sigint = signal.getsignal(signal.SIGINT)
+        # original_sighup = signal.getsignal(signal.SIGHUP)
+        # original_sigterm = signal.getsignal(signal.SIGTERM)
+        #
+        # # set the new signal handlers
+        # signal.signal(signal.SIGINT, lambda s, f: self.set_signal())
+        # signal.signal(signal.SIGHUP, lambda s, f: self.set_signal())
+        # signal.signal(signal.SIGTERM, lambda s, f: self.set_signal())
+
+
+        self.proc_fast_dev = Process(target=self.fast_dev_proc)
+        self.proc_fast_dev.start()
+
+        self.proc_fast_dev.join()
+
+        self.proc_fast_dev = None
+
+        #
+        # # restore the original handlers
+        # signal.signal(signal.SIGINT, original_sigint)
+        # signal.signal(signal.SIGHUP, original_sighup)
+        # signal.signal(signal.SIGTERM, original_sigterm)
 
     def stop(self):
 
@@ -90,17 +119,4 @@ class SimStreamer(object):
 
         self.proc_fast_dev = None
 
-    def start_kb_listener(self):
 
-        if self.kb_listener:
-            self.kb_listener.stop()
-
-        self.keyboard_listener = keyboard.Listener(on_press=self.kb_insert_fast_dev)
-        self.keyboard_listener.start()
-
-    def stop_kb_listener(self):
-
-        if self.kb_listener:
-            self.kb_listener.stop()
-
-        self.kb_listener = None

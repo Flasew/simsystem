@@ -56,10 +56,11 @@ def main():
         init_data_file(opts, basePath, sensors)
     SIM = SIMinterface()
 
-    fast_dev = SIM921(opts.fastUSBport)
-    streamer = SimStreamer(sim921=fast_dev, fname921=dataFileFast,
-                           fname921raw=dataFileRawFast, cmd921='RVAL? 0',
-                           interp_data=np.loadtxt(calibrationFile[-1], skiprows=4))
+    if opts.enableFastDev:
+        fast_dev = SIM921(opts.fastUSBport)
+        streamer = SimStreamer(sim921=fast_dev, fname921=dataFileFast,
+                               fname921raw=dataFileRawFast, cmd921='RVAL? 0',
+                               interp_data=np.loadtxt(calibrationFile[-1], skiprows=4))
 
     time.sleep(.2)
 
@@ -90,18 +91,19 @@ def main():
         print 'Time constant:', SIM.SIM921getTimeConstant(), '\n'
 
         # calibrate sim921 fast data
-        fast_dev.setExcitationFreq(opts.freq921)
-        fast_dev.setTimeConstant(opts.tau921)
-        fast_dev.setResistanceRange(opts.resistanceRangeFast)
-        if opts.exciteRange921 == -1:
-            SIM.SIM921setExcitationRange(6)
+        if opts.enableFastDev:
+            fast_dev.setExcitationFreq(opts.freq921)
+            fast_dev.setTimeConstant(opts.tau921)
+            fast_dev.setResistanceRange(opts.resistanceRangeFast)
+            if opts.exciteRange921 == -1:
+                SIM.SIM921setExcitationRange(6)
 
-        # If we have specified a constant excitation range use that
-        elif opts.exciteRange921 != -1:
-            print 'Fixed excitation chosen: ' + str(opts.exciteRange921)
-            fast_dev.setExcitationRange(opts.exciteRange921)
+            # If we have specified a constant excitation range use that
+            elif opts.exciteRange921 != -1:
+                print 'Fixed excitation chosen: ' + str(opts.exciteRange921)
+                fast_dev.setExcitationRange(opts.exciteRange921)
 
-        streamer.start_kb_listener()
+            streamer.start()
 
         # Initialize variables for the first iteration. The excitation and
         # resistance ranges are autoset after the first iteration. For the first
@@ -208,7 +210,7 @@ def main():
             temperatureDataStr = formatDataStr(temperatureData)
             writeToFile(dataFile, temperatureDataStr, 'a')
 
-            if (streamer.proc_fast_dev):
+            if opts.enableFastDev:
                 writeToFile(dataFile, "{:+.6E}".format(streamer.latest_fast_data.value), 'a')
             else:
                 writeToFile(dataFile, "FAST_DEV_OFF", 'a')
@@ -229,8 +231,9 @@ def main():
         sys.exit()
     finally:
         SIM.closeSerial()
-        streamer.stop()
-        streamer.stop_kb_listener()
+        if opts.enableFastDev:
+            streamer.set_signal()
+
 
 #-----------------------------------------------------------------------------#
 #-----------------------------------------------------------------------------#
@@ -281,6 +284,12 @@ def parseOptions(basePath):
         dest = 'fastUSBport',
         action = 'store',
         default = '/dev/ttyUSB1')
+
+    parser.add_option('--enableFastDev',
+        help='SIM921 fast streaming device enabled. Default = %default ',
+        dest='enableFastDev',
+        action='store_true',
+        default=False)
 
     parser.add_option('--dataFileName',
         help = 'Data file name (do not specify extension, appends \'.txt\' ' \
